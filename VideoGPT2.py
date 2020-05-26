@@ -1,8 +1,9 @@
-from transformers import *
 import math
+
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss, MSELoss
+from transformers import *
 
 
 def gelu(x):
@@ -146,10 +147,11 @@ class Block(nn.Module):
         self.mlp = MLP(4 * nx, config)
 
     def forward(self, x, layer_past=None, attention_mask=None, head_mask=None):
-        output_attn = self.attn(self.ln_1(x),
-                                layer_past=layer_past,
-                                attention_mask=attention_mask,
-                                head_mask=head_mask)
+        output_attn = self.attn(
+            self.ln_1(x),
+            layer_past=layer_past,
+            attention_mask=attention_mask,
+            head_mask=head_mask)
         a = output_attn[0]  # output_attn: a, present, (attentions)
 
         x = x + a
@@ -167,7 +169,14 @@ class VideoGPT2Model(GPT2Model):
         self.h = nn.ModuleList(
             [Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
 
-    def forward(self, input_embs, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None):
+    def forward(
+            self,
+            input_embs,
+            past=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None):
         if past is None:
             past_length = 0
             past = [None] * len(self.h)
@@ -293,8 +302,16 @@ class VideoGPT2LMHeadModel(GPT2PreTrainedModel):
         self._tie_or_clone_weights(self.lm_head,
                                    self.transformer.wte)
 
-    def forward(self, input_embs, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
-                labels=None, mode="reply"):
+    def forward(
+            self,
+            input_embs,
+            past=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            labels=None,
+            mode="reply"):
         transformer_outputs = self.transformer(input_embs,
                                                past=past,
                                                attention_mask=attention_mask,

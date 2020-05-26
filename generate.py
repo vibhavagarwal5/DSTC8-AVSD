@@ -1,21 +1,20 @@
+import copy
 import json
 import logging
 import random
 import time
-import copy
 from argparse import ArgumentParser
 from itertools import chain
 from pprint import pformat
-import copy
-import numpy as np
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-
 from transformers import *
-from VideoGPT2 import *
-from train import SPECIAL_TOKENS, SPECIAL_TOKENS_DICT
-from dataset import get_dataset, build_input_from_segments
+
+from dataset import (SPECIAL_TOKENS, SPECIAL_TOKENS_DICT,
+                     build_input_from_segments, get_dataset)
+from VideoGPT2 import VideoGPT2LMHeadModel
 
 
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
@@ -33,8 +32,8 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
     top_k = min(top_k, logits.size(-1))
     if top_k > 0:
         # Remove all tokens with a probability less than the last token in the top-k tokens
-        indices_to_remove = logits < torch.topk(logits, top_k)[
-            0][..., -1, None]
+        indices_to_remove = logits < \
+            torch.topk(logits, top_k)[0][..., -1, None]
         logits[indices_to_remove] = filter_value
 
     if top_p > 0.0:
@@ -46,8 +45,8 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
         # Remove tokens with cumulative probability above the threshold
         sorted_indices_to_remove = cumulative_probabilities > top_p
         # Shift the indices to the right to keep also the first token above the threshold
-        sorted_indices_to_remove[...,
-                                 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 1:] = \
+            sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
 
         # Back to unsorted indices and set them to -infinity
@@ -65,18 +64,25 @@ def sample_sequence(caption, history, tokenizer, model, args, current_output=Non
     if current_output is None:
         current_output = []
     for i in range(args.max_length):
-        instance, sequence = build_input_from_segments(
-            caption, history, current_output, tokenizer, with_eos=False, drop_caption=False)
+        instance, sequence = build_input_from_segments(caption,
+                                                       history,
+                                                       current_output,
+                                                       tokenizer,
+                                                       with_eos=False,
+                                                       drop_caption=False)
 
-        input_ids = torch.tensor(
-            instance["input_ids"], device=args.device).unsqueeze(0)
-        token_type_ids = torch.tensor(
-            instance["token_type_ids"], device=args.device).unsqueeze(0)
+        input_ids = torch.tensor(instance["input_ids"],
+                                 device=args.device).unsqueeze(0)
+        token_type_ids = torch.tensor(instance["token_type_ids"],
+                                      device=args.device).unsqueeze(0)
         input_embs = model.transformer.wte(input_ids)
         if video is not None:
             input_embs = torch.cat([model.video_ff(video), input_embs], dim=1)
-            token_type_ids = torch.cat([torch.ones((1, video.size(1))).long().cuda(
-            ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
+            token_type_ids = torch.cat([
+                torch.ones((1, video.size(1))).long().cuda() *
+                tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]),
+                token_type_ids
+            ], dim=1)
 
         logits = model(input_embs, token_type_ids=token_type_ids)
         if "gpt2" == args.model:
@@ -110,19 +116,28 @@ def beam_search(caption, history, tokenizer, model, args, current_output=None, v
         new_hyplist = []
         argmin = 0
         for out, lp, st in hyplist:
-            instance, sequence = build_input_from_segments(
-                caption, history, st, tokenizer, with_eos=False, drop_caption=True)
+            instance, sequence = build_input_from_segments(caption,
+                                                           history,
+                                                           st,
+                                                           tokenizer,
+                                                           with_eos=False,
+                                                           drop_caption=True)
 
-            input_ids = torch.tensor(
-                instance["input_ids"], device=args.device).unsqueeze(0)
-            token_type_ids = torch.tensor(
-                instance["token_type_ids"], device=args.device).unsqueeze(0)
+            input_ids = torch.tensor(instance["input_ids"],
+                                     device=args.device).unsqueeze(0)
+            token_type_ids = torch.tensor(instance["token_type_ids"],
+                                          device=args.device).unsqueeze(0)
             input_embs = model.transformer.wte(input_ids)
             if video is not None:
-                input_embs = torch.cat(
-                    [model.video_ff(video), input_embs], dim=1)
-                token_type_ids = torch.cat([torch.ones((1, video.size(1))).long().cuda(
-                ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
+                input_embs = torch.cat([
+                    model.video_ff(video),
+                    input_embs
+                ], dim=1)
+                token_type_ids = torch.cat([
+                    torch.ones((1, video.size(1))).long().cuda() *
+                    tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]),
+                    token_type_ids
+                ], dim=1)
 
             logits = model(input_embs, token_type_ids=token_type_ids)
             if "gpt2" == args.model:
@@ -171,18 +186,28 @@ def greedy_decode(caption, history, tokenizer, model, args, current_output=None,
     ys = []
 
     for i in range(args.max_length):
-        instance, sequence = build_input_from_segments(
-            caption, history, ys, tokenizer, with_eos=False, drop_caption=False)
+        instance, sequence = build_input_from_segments(caption,
+                                                       history,
+                                                       ys,
+                                                       tokenizer,
+                                                       with_eos=False,
+                                                       drop_caption=False)
 
-        input_ids = torch.tensor(
-            instance["input_ids"], device=args.device).unsqueeze(0)
-        token_type_ids = torch.tensor(
-            instance["token_type_ids"], device=args.device).unsqueeze(0)
+        input_ids = torch.tensor(instance["input_ids"],
+                                 device=args.device).unsqueeze(0)
+        token_type_ids = torch.tensor(instance["token_type_ids"],
+                                      device=args.device).unsqueeze(0)
         input_embs = model.transformer.wte(input_ids)
         if video is not None:
-            input_embs = torch.cat([model.video_ff(video), input_embs], dim=1)
-            token_type_ids = torch.cat([torch.ones((1, video.size(1))).long().cuda(
-            ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
+            input_embs = torch.cat([
+                model.video_ff(video),
+                input_embs
+            ], dim=1)
+            token_type_ids = torch.cat([
+                torch.ones((1, video.size(1))).long().cuda() *
+                tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]),
+                token_type_ids
+            ], dim=1)
 
         logits = model(input_embs, token_type_ids=token_type_ids)
         if "gpt2" == args.model:
@@ -204,13 +229,15 @@ def generate_response(model, data, dataset, args, ref_data=None):
         for idx, dialog in enumerate(data['dialogs']):
             vid = dialog['image_id']
             out_dialog = dialog['dialog'][-1:]
-            pred_dialog = {'image_id': vid,
-                           'dialog': copy.deepcopy(out_dialog)}
+            pred_dialog = {
+                'image_id': vid,
+                'dialog': copy.deepcopy(out_dialog)
+            }
             result_dialogs.append(pred_dialog)
 
-            vgg = np.load("data/vggish_testset/" + vid + ".npy")
-            i3d_flow = np.load("data/i3d_flow_testset/" + vid + ".npy")
-            i3d_rgb = np.load("data/i3d_rgb_testset/" + vid + ".npy")
+            vgg = np.load(f"data/vggish_testset/{vid}.npy")
+            i3d_flow = np.load(f"data/i3d_flow_testset/{vid}.npy")
+            i3d_rgb = np.load(f"data/i3d_rgb_testset/{vid}.npy")
 
             sample_i3d_flow = i3d_flow[range(1, i3d_flow.shape[0], 1)]
             sample_i3d_rgb = i3d_rgb[range(1, i3d_rgb.shape[0], 1)]
@@ -219,8 +246,10 @@ def generate_response(model, data, dataset, args, ref_data=None):
             i3d_flow = torch.from_numpy(sample_i3d_flow).float().cuda()
             i3d_rgb = torch.from_numpy(sample_i3d_rgb).float().cuda()
             min_length = min([i3d_flow.size(0), i3d_rgb.size(0), vgg.size(0)])
-            i3d = torch.cat([i3d_flow[:min_length], i3d_rgb[:min_length],
-                             vgg[:min_length]], dim=1).unsqueeze(0)
+            i3d = torch.cat([
+                i3d_flow[:min_length], i3d_rgb[:min_length],
+                vgg[:min_length]
+            ], dim=1).unsqueeze(0)
 
             for t, qa in enumerate(out_dialog):
                 logging.info('%d %s_%d' % (qa_id, vid, t))
@@ -231,12 +260,20 @@ def generate_response(model, data, dataset, args, ref_data=None):
 
                 if args.beam_search:
                     #hypstr = greedy_decode(dataset[idx]["caption"], dataset[idx]["history"], tokenizer, model, args, video=i3d)
-                    hypstr = beam_search(
-                        dataset[idx]["caption"], dataset[idx]["history"], tokenizer, model, args, video=i3d)
+                    hypstr = beam_search(dataset[idx]["caption"],
+                                         dataset[idx]["history"],
+                                         tokenizer,
+                                         model,
+                                         args,
+                                         video=i3d)
                     hypstr = hypstr[0][0]
                 else:
-                    hypstr = sample_sequence(
-                        dataset[idx]["caption"], dataset[idx]["history"], tokenizer, model, args, video=i3d)
+                    hypstr = sample_sequence(dataset[idx]["caption"],
+                                             dataset[idx]["history"],
+                                             tokenizer,
+                                             model,
+                                             args,
+                                             video=i3d)
                 hypstr = tokenizer.decode(hypstr, skip_special_tokens=True)
                 logging.info('HYP: ' + hypstr)
                 pred_dialog['dialog'][t]['answer'] = hypstr
@@ -297,15 +334,17 @@ if __name__ == "__main__":
     tokenizer.add_special_tokens(SPECIAL_TOKENS_DICT)
     model_class = VideoGPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
     model_config = GPT2Config.from_pretrained(args.model_checkpoint)
-    model = model_class.from_pretrained(
-        args.model_checkpoint + "checkpoint_mymodel_4.pth", config=model_config)
+    model = model_class.from_pretrained(args.model_checkpoint + "checkpoint_mymodel_4.pth",
+                                        config=model_config)
     model.to(args.device)
     model.eval()
 
     logging.info('Loading test data from ' + args.test_set)
     test_data = json.load(open(args.test_set, 'r'))
-    test_dataset = get_dataset(
-        tokenizer, args.test_set, undisclosed_only=True, n_history=args.max_history)
+    test_dataset = get_dataset(tokenizer,
+                               args.test_set,
+                               undisclosed_only=True,
+                               n_history=args.max_history)
     # generate sentences
     logging.info('-----------------------generate--------------------------')
     start_time = time.time()

@@ -1,33 +1,29 @@
 # Copyright (c) 2019-present, HuggingFace Inc.
 # All rights reserved. This source code is licensed under the BSD-style license found in the LICENSE file in the root directory of this source tree.
-import os
-import math
 import logging
-from pprint import pformat
+import math
+import os
+import pickle as pkl
 from argparse import ArgumentParser
 from collections import defaultdict
 from itertools import chain
+from pprint import pformat
 
 import torch
-from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, TensorDataset
+from ignite.contrib.handlers.param_scheduler import PiecewiseLinear
+from ignite.contrib.handlers.tensorboard_logger import (
+    OptimizerParamsHandler, OutputHandler, TensorboardLogger)
+from ignite.contrib.handlers.tqdm_logger import ProgressBar
 from ignite.engine import Engine, Events
 from ignite.handlers import ModelCheckpoint
 from ignite.metrics import Accuracy, Loss, MetricsLambda, RunningAverage
-from ignite.contrib.handlers import ProgressBar, PiecewiseLinear
-from ignite.contrib.handlers.tensorboard_logger import TensorboardLogger, OutputHandler, OptimizerParamsHandler
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, TensorDataset
 from transformers import *
-from VideoGPT2 import *
-import pickle as pkl
 
-from dataset import get_dataset, AVSDDataSet, collate_fn
-
-SPECIAL_TOKENS = ["<bos>", "<eos>", "<speaker1>",
-                  "<speaker2>", "<cap>", "<video>", "<pad>"]
-SPECIAL_TOKENS_DICT = {'bos_token': "<bos>", 'eos_token': "<eos>", 'additional_special_tokens': [
-    "<speaker1>", "<speaker2>", "<video>", "<cap>"], 'pad_token': "<pad>"}
-MODEL_INPUTS = ["input_ids", "token_type_ids", "lm_labels"]
-PADDED_INPUTS = ["input_ids", "token_type_ids", "lm_labels"]
+from dataset import (PADDED_INPUTS, SPECIAL_TOKENS, SPECIAL_TOKENS_DICT,
+                     AVSDDataSet, collate_fn, get_dataset)
+from VideoGPT2 import VideoGPT2LMHeadModel
 
 logger = logging.getLogger(__file__)
 
@@ -43,24 +39,28 @@ def average_distributed_scalar(scalar, args):
 
 
 def get_data_loaders_new(args, tokenizer):
-    train_data = get_dataset(tokenizer, args.train_path,
-                             args.fea_path, n_history=args.max_history)
-    # with open("train_data_gpt2.pkl", "rb") as f:
-    #    train_data = pkl.load(f)
-    # pkl.dump(train_data, f)
+    train_data = get_dataset(tokenizer,
+                             args.train_path,
+                             args.fea_path,
+                             n_history=args.max_history)
     valid_data = get_dataset(tokenizer, args.valid_path,
                              args.fea_path, n_history=args.max_history)
-    # with open("valid_data_gpt2.pkl", "rb") as f:
-    #    valid_data = pkl.load(f)
-    # pkl.dump(valid_data, f)
-    train_dataset = AVSDDataSet(
-        train_data[0], tokenizer, (train_data[1], valid_data[1]), drop_rate=0, train=True)
-    valid_dataset = AVSDDataSet(
-        valid_data[0], tokenizer, (valid_data[1], train_data[1]), drop_rate=0, train=False)
-    train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, num_workers=4, shuffle=(
-        not args.distributed), collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
-    valid_loader = DataLoader(valid_dataset, batch_size=args.valid_batch_size, num_workers=4,
-                              shuffle=False, collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
+    train_dataset = AVSDDataSet(train_data[0], tokenizer,
+                                (train_data[1], valid_data[1]),
+                                drop_rate=0, train=True)
+    valid_dataset = AVSDDataSet(valid_data[0], tokenizer,
+                                (valid_data[1], train_data[1]),
+                                drop_rate=0, train=False)
+    train_loader = DataLoader(train_dataset,
+                              shuffle=(not args.distributed),
+                              batch_size=args.train_batch_size,
+                              num_workers=4,
+                              collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
+    valid_loader = DataLoader(valid_dataset,
+                              shuffle=False,
+                              batch_size=args.valid_batch_size,
+                              num_workers=4,
+                              collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
     return train_loader, valid_loader
 
 
@@ -141,8 +141,8 @@ def train():
 
     logger.info("Prepare datasets")
     train_loader, val_loader = get_data_loaders_new(args, tokenizer)
-    # Training function and trainer
 
+    # Training function and trainer
     def update(engine, batch):
         model.train()
         batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
@@ -152,10 +152,16 @@ def train():
         input_embs = torch.cat([video_embs, input_embs], dim=1)
         token_type_ids = torch.cat([torch.ones((i3d.size(0), i3d.size(1))).long().cuda(
         ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
-        video_loss = model(input_embs, token_type_ids=token_type_ids, labels=(
-            labels, i3d), attention_mask=[video_mask, input_mask], mode="video")[0]
-        reply_loss = model(input_embs, token_type_ids=token_type_ids, labels=(
-            labels, i3d), attention_mask=[reply_mask, input_mask], mode="reply")[0]
+        video_loss = model(input_embs,
+                           token_type_ids=token_type_ids,
+                           labels=(labels, i3d),
+                           attention_mask=[video_mask, input_mask],
+                           mode="video")[0]
+        reply_loss = model(input_embs,
+                           token_type_ids=token_type_ids,
+                           labels=(labels, i3d),
+                           attention_mask=[reply_mask, input_mask],
+                           mode="reply")[0]
         loss = (video_loss + reply_loss) / args.gradient_accumulation_steps
         if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -183,8 +189,9 @@ def train():
             input_embs = torch.cat([video_embs, input_embs], dim=1)
             token_type_ids = torch.cat([torch.ones((i3d.size(0), i3d.size(1))).long().cuda(
             ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
-            model_outputs = model(input_embs, token_type_ids=token_type_ids, attention_mask=[
-                                  reply_mask, input_mask])[0]
+            model_outputs = model(input_embs,
+                                  token_type_ids=token_type_ids,
+                                  attention_mask=[reply_mask, input_mask])[0]
 
             lm_logits = model_outputs  # So we can also use GPT2 outputs
             lm_logits_flat_shifted = lm_logits[..., :-1,
@@ -210,10 +217,17 @@ def train():
 
     # Prepare metrics - note how we compute distributed metrics
     RunningAverage(output_transform=lambda x: x).attach(trainer, "loss")
-    metrics = {"nll": Loss(torch.nn.CrossEntropyLoss(
-        ignore_index=-1), output_transform=lambda x: (x[0], x[1]))}
-    metrics.update({"average_nll": MetricsLambda(
-        average_distributed_scalar, metrics["nll"], args)})
+    metrics = {
+        "nll": Loss(
+            torch.nn.CrossEntropyLoss(ignore_index=-1),
+            output_transform=lambda x: (x[0], x[1])
+        )
+    }
+    metrics.update({
+        "average_nll": MetricsLambda(average_distributed_scalar,
+                                     metrics["nll"],
+                                     args)
+    })
     metrics["average_ppl"] = MetricsLambda(math.exp, metrics["average_nll"])
     for name, metric in metrics.items():
         metric.attach(evaluator, name)
@@ -226,17 +240,27 @@ def train():
             "Validation: %s" % pformat(evaluator.state.metrics)))
 
         tb_logger = TensorboardLogger(log_dir="./tb_logs")
-        tb_logger.attach(trainer, log_handler=OutputHandler(
-            tag="training", metric_names=["loss"]), event_name=Events.ITERATION_COMPLETED)
-        tb_logger.attach(trainer, log_handler=OptimizerParamsHandler(
-            optimizer), event_name=Events.ITERATION_STARTED)
-        tb_logger.attach(evaluator, log_handler=OutputHandler(tag="validation", metric_names=list(
-            metrics.keys()), another_engine=trainer), event_name=Events.EPOCH_COMPLETED)
+        tb_logger.attach(trainer,
+                         log_handler=OutputHandler(
+                             tag="training", metric_names=["loss"]),
+                         event_name=Events.ITERATION_COMPLETED)
+        tb_logger.attach(trainer,
+                         log_handler=OptimizerParamsHandler(optimizer),
+                         event_name=Events.ITERATION_STARTED)
+        tb_logger.attach(evaluator,
+                         log_handler=OutputHandler(
+                             tag="validation", metric_names=list(metrics.keys()), another_engine=trainer),
+                         event_name=Events.EPOCH_COMPLETED)
 
-        checkpoint_handler = ModelCheckpoint(
-            args.log_path, 'checkpoint', save_interval=1, n_saved=8, require_empty=False)
-        trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {'mymodel': getattr(
-            model, 'module', model)})  # "getattr" take care of distributed encapsulation
+        checkpoint_handler = ModelCheckpoint(args.log_path,
+                                             'checkpoint',
+                                             save_interval=1,
+                                             n_saved=8,
+                                             require_empty=False)
+        trainer.add_event_handler(Events.EPOCH_COMPLETED,
+                                  checkpoint_handler,
+                                  {'mymodel': getattr(model, 'module', model)})
+        # "getattr" take care of distributed encapsulation
 
         torch.save(args, args.log_path + 'model_training_args.bin')
         getattr(model, 'module', model).config.to_json_file(

@@ -1,19 +1,23 @@
-# coding: utf-8
-# author: noctli
 import json
-import pickle
 import logging
+import pickle
+from itertools import chain
+
 import numpy as np
 import torch
 import torch.utils.data
 from torch.utils.data import Dataset
-from itertools import chain
-# from train import SPECIAL_TOKENS, MODEL_INPUTS, PADDED_INPUTS
-SPECIAL_TOKENS = ["<bos>", "<eos>", "<speaker1>",
-                  "<speaker2>", "<cap>", "<video>", "<pad>"]
-SPECIAL_TOKENS_DICT = {'bos_token': "<bos>", 'eos_token': "<eos>", 'additional_special_tokens': [
-    "<speaker1>", "<speaker2>", "<video>", "<cap>"], 'pad_token': "<pad>"}
-MODEL_INPUTS = ["input_ids", "token_type_ids", "lm_labels"]
+
+SPECIAL_TOKENS = ["<bos>", "<eos>",
+                  "<speaker1>", "<speaker2>",
+                  "<cap>", "<video>",
+                  "<pad>"]
+SPECIAL_TOKENS_DICT = {
+    'bos_token': "<bos>",
+    'eos_token': "<eos>",
+    'additional_special_tokens': ["<speaker1>", "<speaker2>", "<video>", "<cap>"],
+    'pad_token': "<pad>"
+}
 PADDED_INPUTS = ["input_ids", "token_type_ids", "lm_labels"]
 
 
@@ -26,7 +30,6 @@ def tokenize(obj, tokenizer):
 
 
 def get_dataset(tokenizer, data_file, feature_path=None, undisclosed_only=False, n_history=3):
-
     dialog_data = json.load(open(data_file, 'r'))
     dialog_list = []
     vid_set = set()
@@ -77,8 +80,7 @@ def get_dataset(tokenizer, data_file, feature_path=None, undisclosed_only=False,
                 basename = dataname.replace('<FeaType>', ftype)
             features = {}
             for vid in vid_set:
-                filename = basename.replace('<ImageID>', vid)
-                filepath = feature_path + filename
+                filepath = feature_path + basename.replace('<ImageID>', vid)
                 features[vid] = (filepath, filepath)
             all_features[ftype] = features
         return dialog_list, all_features
@@ -105,11 +107,13 @@ class AVSDDataSet(Dataset):
         ans = self.dialogs[index]['answer']
 
         if np.random.rand() < self.drop_rate:
-            instance, _ = build_input_from_segments(
-                cap, his, ans, self.tokenizer, video=False, drop_caption=True, train=self.train)
+            instance, _ = build_input_from_segments(cap, his, ans, self.tokenizer,
+                                                    video=False, drop_caption=True,
+                                                    train=self.train)
         else:
-            instance, _ = build_input_from_segments(
-                cap, his, ans, self.tokenizer, video=False, drop_caption=False, train=self.train)
+            instance, _ = build_input_from_segments(cap, his, ans, self.tokenizer,
+                                                    video=False, drop_caption=False,
+                                                    train=self.train)
         input_ids = torch.Tensor(instance["input_ids"]).long()
         token_type_ids = torch.Tensor(instance["token_type_ids"]).long()
         lm_labels = torch.Tensor(instance["lm_labels"]).long()
@@ -167,8 +171,10 @@ def collate_fn(batch, pad_token, features=None):
         i3d_mask = torch.sum(i3d != 1, dim=2) != 0
         input_mask = torch.cat([i3d_mask, input_mask], dim=1)
         i3d_labels = torch.ones((i3d.size(0), i3d.size(1))).long() * -1
-        video_mask = torch.cat(
-            [torch.zeros((i3d.size(0), i3d.size(1))), torch.ones(lm_labels.size())], 1)
+        video_mask = torch.cat([
+            torch.zeros((i3d.size(0), i3d.size(1))),
+            torch.ones(lm_labels.size())
+        ], 1)
         reply_mask = torch.zeros(video_mask.size())
         lm_labels = torch.cat([i3d_labels, lm_labels], dim=1)
         return input_ids, token_type_ids, lm_labels, input_mask, i3d, video_mask, reply_mask
@@ -177,16 +183,20 @@ def collate_fn(batch, pad_token, features=None):
 
 
 def pad_dataset(dataset, padding=0):
-    """ Pad the dataset. This could be optimized by defining a Dataset class and padd only batches but this is simpler. """
+    """ 
+    Pad the dataset. This could be optimized by defining a Dataset class and padd only batches but this is simpler. 
+    """
     max_l = max(len(x) for x in dataset["input_ids"])
     for name in PADDED_INPUTS:
-        dataset[name] = [x + [padding if name != "labels" else -1]
-                         * (max_l - len(x)) for x in dataset[name]]
+        dataset[name] = [x + (max_l - len(x)) * [padding if name != "labels" else -1]
+                         for x in dataset[name]]
     return dataset
 
 
 def build_input_from_segments(caption, history, reply, tokenizer, with_eos=True, video=False, drop_caption=False, train=True):
-    """ Build a sequence of input from 3 segments: caption(caption+summary) history and last reply """
+    """ 
+    Build a sequence of input from 3 segments: caption(caption+summary) history and last reply 
+    """
     bos, eos, speaker1, speaker2, cap = tokenizer.convert_tokens_to_ids(
         SPECIAL_TOKENS[:-2])
     if not drop_caption:
@@ -200,7 +210,6 @@ def build_input_from_segments(caption, history, reply, tokenizer, with_eos=True,
         instance["token_type_ids"] = [cap] * len(sequence[0]) + [
             speaker2 if i % 2 else speaker1 for i, s in enumerate(sequence[1:]) for _ in s]
         if video and train:
-            #instance["lm_labels"] = sequence[0] + ([-1]*sum(len(s) for s in sequence[1:-1])) + sequence[-1]
             instance["lm_labels"] = sequence[0] + \
                 ([-1] * sum(len(s) for s in sequence[1:-1])) + sequence[-1]
         else:
@@ -223,4 +232,3 @@ def build_input_from_segments(caption, history, reply, tokenizer, with_eos=True,
                                                 for s in sequence[:-1])) + sequence[-1]
 
     return instance, sequence
-
