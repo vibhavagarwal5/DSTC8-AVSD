@@ -8,6 +8,7 @@ from torch.nn import CrossEntropyLoss, MSELoss
 def gelu(x):
     return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
+
 class Attention(nn.Module):
     def __init__(self, nx, n_ctx, config, scale=False):
         super(Attention, self).__init__()
@@ -16,7 +17,8 @@ class Attention(nn.Module):
         n_state = nx  # in Attention: n_state=768 (nx=n_embd)
         # [switch nx => n_state from Block to Attention to keep identical to TF implem]
         assert n_state % config.n_head == 0
-        self.register_buffer("bias", torch.tril(torch.ones(n_ctx, n_ctx)).view(1, 1, n_ctx, n_ctx))
+        self.register_buffer("bias", torch.tril(
+            torch.ones(n_ctx, n_ctx)).view(1, 1, n_ctx, n_ctx))
         self.n_head = config.n_head
         self.split_size = n_state
         self.scale = scale
@@ -31,21 +33,24 @@ class Attention(nn.Module):
         if len(heads) == 0:
             return
         mask = torch.ones(self.n_head, self.split_size // self.n_head)
-        heads = set(heads) - self.pruned_heads  # Convert to set and emove already pruned heads
+        # Convert to set and emove already pruned heads
+        heads = set(heads) - self.pruned_heads
         for head in heads:
             # Compute how many pruned heads are before the head and move the index accordingly
             head = head - sum(1 if h < head else 0 for h in self.pruned_heads)
             mask[head] = 0
         mask = mask.view(-1).contiguous().eq(1)
         index = torch.arange(len(mask))[mask].long()
-        index_attn = torch.cat([index, index + self.split_size, index + (2*self.split_size)])
+        index_attn = torch.cat(
+            [index, index + self.split_size, index + (2 * self.split_size)])
 
         # Prune conv1d layers
         self.c_attn = prune_conv1d_layer(self.c_attn, index_attn, dim=1)
         self.c_proj = prune_conv1d_layer(self.c_proj, index, dim=0)
 
         # Update hyper params
-        self.split_size = (self.split_size // self.n_head) * (self.n_head - len(heads))
+        self.split_size = (self.split_size // self.n_head) * \
+            (self.n_head - len(heads))
         self.n_head = self.n_head - len(heads)
         self.pruned_heads = self.pruned_heads.union(heads)
 
@@ -54,7 +59,7 @@ class Attention(nn.Module):
         if self.scale:
             w = w / math.sqrt(v.size(-1))
         nd, ns = w.size(-2), w.size(-1)
-        b = self.bias[:, :, ns-nd:ns, :ns]
+        b = self.bias[:, :, ns - nd:ns, :ns]
         #w = w * b - 1e18 * (1 - b)
 
         if attention_mask is not None:
@@ -84,9 +89,11 @@ class Attention(nn.Module):
         new_x_shape = x.size()[:-1] + (self.n_head, x.size(-1) // self.n_head)
         x = x.view(*new_x_shape)  # in Tensorflow implem: fct split_states
         if k:
-            return x.permute(0, 2, 3, 1)  # (batch, head, head_features, seq_length)
+            # (batch, head, head_features, seq_length)
+            return x.permute(0, 2, 3, 1)
         else:
-            return x.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
+            # (batch, head, seq_length, head_features)
+            return x.permute(0, 2, 1, 3)
 
     def forward(self, x, layer_past=None, attention_mask=None, head_mask=None):
         x = self.c_attn(x)
@@ -95,10 +102,13 @@ class Attention(nn.Module):
         key = self.split_heads(key, k=True)
         value = self.split_heads(value)
         if layer_past is not None:
-            past_key, past_value = layer_past[0].transpose(-2, -1), layer_past[1]  # transpose back cf below
+            # transpose back cf below
+            past_key, past_value = layer_past[0].transpose(
+                -2, -1), layer_past[1]
             key = torch.cat((past_key, key), dim=-1)
             value = torch.cat((past_value, value), dim=-2)
-        present = torch.stack((key.transpose(-2, -1), value))  # transpose to have same shapes for stacking
+        # transpose to have same shapes for stacking
+        present = torch.stack((key.transpose(-2, -1), value))
 
         attn_outputs = self._attn(query, key, value, attention_mask, head_mask)
         a = attn_outputs[0]
@@ -154,8 +164,9 @@ class VideoGPT2Model(GPT2Model):
 
     def __init__(self, config):
         super(VideoGPT2Model, self).__init__(config)
-        self.h = nn.ModuleList([Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
-        
+        self.h = nn.ModuleList(
+            [Block(config.n_ctx, config, scale=True) for _ in range(config.n_layer)])
+
     def forward(self, input_embs, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None):
         if past is None:
             past_length = 0
@@ -163,8 +174,10 @@ class VideoGPT2Model(GPT2Model):
         else:
             past_length = past[0][0].size(-2)
         if position_ids is None:
-            position_ids = torch.arange(past_length, input_embs.size(-2) + past_length, dtype=torch.long, device=input_embs.device)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_embs[:, :, 0])
+            position_ids = torch.arange(
+                past_length, input_embs.size(-2) + past_length, dtype=torch.long, device=input_embs.device)
+            position_ids = position_ids.unsqueeze(
+                0).expand_as(input_embs[:, :, 0])
 
         # Attention mask.
         if attention_mask is not None:
@@ -181,8 +194,10 @@ class VideoGPT2Model(GPT2Model):
             # positions we want to attend and -10000.0 for masked positions.
             # Since we are adding it to the raw scores before the softmax, this is
             # effectively the same as removing these entirely.
-            attention_mask[0] = attention_mask[0].to(dtype=next(self.parameters()).dtype) # fp16 compatibility
-            attention_mask[1] = attention_mask[1].to(dtype=next(self.parameters()).dtype) # fp16 compatibility
+            attention_mask[0] = attention_mask[0].to(
+                dtype=next(self.parameters()).dtype)  # fp16 compatibility
+            attention_mask[1] = attention_mask[1].to(
+                dtype=next(self.parameters()).dtype)  # fp16 compatibility
             #attention_mask = (1.0 - attention_mask) * -1e18
 
         # Prepare head mask if needed
@@ -191,11 +206,15 @@ class VideoGPT2Model(GPT2Model):
         # head_mask has shape n_layer x batch x n_heads x N x N
         if head_mask is not None:
             if head_mask.dim() == 1:
-                head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-                head_mask = head_mask.expand(self.config.n_layer, -1, -1, -1, -1)
+                head_mask = head_mask.unsqueeze(0).unsqueeze(
+                    0).unsqueeze(-1).unsqueeze(-1)
+                head_mask = head_mask.expand(
+                    self.config.n_layer, -1, -1, -1, -1)
             elif head_mask.dim() == 2:
-                head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
-            head_mask = head_mask.to(dtype=next(self.parameters()).dtype) # switch to fload if need + fp16 compatibility
+                # We can specify head_mask for each layer
+                head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+            # switch to fload if need + fp16 compatibility
+            head_mask = head_mask.to(dtype=next(self.parameters()).dtype)
         else:
             head_mask = [None] * self.config.n_layer
 
@@ -221,7 +240,8 @@ class VideoGPT2Model(GPT2Model):
         all_hidden_states = ()
         for i, (block, layer_past) in enumerate(zip(self.h, past)):
             if self.output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states.view(*output_shape),)
+                all_hidden_states = all_hidden_states + \
+                    (hidden_states.view(*output_shape),)
 
             outputs = block(hidden_states,
                             layer_past=layer_past,
@@ -246,10 +266,13 @@ class VideoGPT2Model(GPT2Model):
             outputs = outputs + (all_hidden_states,)
         if self.output_attentions:
             # let the number of heads free (-1) so we can extract attention even after head pruning
-            attention_output_shape = input_shape[:-1] + (-1,) + all_attentions[0].shape[-2:]
-            all_attentions = tuple(t.view(*attention_output_shape) for t in all_attentions)
+            attention_output_shape = input_shape[:-1] + \
+                (-1,) + all_attentions[0].shape[-2:]
+            all_attentions = tuple(t.view(*attention_output_shape)
+                                   for t in all_attentions)
             outputs = outputs + (all_attentions,)
-        return outputs  # last hidden state, presents, (all hidden_states), (attentions)
+        # last hidden state, presents, (all hidden_states), (attentions)
+        return outputs
 
 
 class VideoGPT2LMHeadModel(GPT2PreTrainedModel):
@@ -269,7 +292,6 @@ class VideoGPT2LMHeadModel(GPT2PreTrainedModel):
         """
         self._tie_or_clone_weights(self.lm_head,
                                    self.transformer.wte)
-
 
     def forward(self, input_embs, past=None, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None,
                 labels=None, mode="reply"):
@@ -292,15 +314,18 @@ class VideoGPT2LMHeadModel(GPT2PreTrainedModel):
                 # Flatten the tokens
                 loss_text_fct = CrossEntropyLoss(ignore_index=-1)
                 loss_text = loss_text_fct(shift_logits.view(-1, shift_logits.size(-1)),
-                            shift_labels.view(-1))
+                                          shift_labels.view(-1))
                 loss = loss_text
-            else: 
-                lm_video_regs = self.video_inverse_ff(hidden_states[:, :labels[1].size(1), :])
+            else:
+                lm_video_regs = self.video_inverse_ff(
+                    hidden_states[:, :labels[1].size(1), :])
                 shift_video_regs = lm_video_regs[..., :-1, :].contiguous()
                 shift_video_labels = labels[1][..., :-1, :].contiguous()
                 loss_video_fct = MSELoss(reduce=True, size_average=True)
-                loss_video = loss_video_fct(shift_video_regs, shift_video_labels)
+                loss_video = loss_video_fct(
+                    shift_video_regs, shift_video_labels)
                 loss = loss_video
             outputs = (loss,) + outputs
 
-        return outputs  # (loss), lm_logits, presents, (all hidden_states), (attentions)
+        # (loss), lm_logits, presents, (all hidden_states), (attentions)
+        return outputs
