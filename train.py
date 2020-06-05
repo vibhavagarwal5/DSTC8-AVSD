@@ -55,23 +55,27 @@ def get_data_loaders_new(args, tokenizer):
                               shuffle=(not args.distributed),
                               batch_size=args.train_batch_size,
                               num_workers=4,
-                              collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
+                              collate_fn=lambda x: collate_fn(x,
+                                                              tokenizer.pad_token_id,
+                                                              features=True))
     valid_loader = DataLoader(valid_dataset,
                               shuffle=False,
                               batch_size=args.valid_batch_size,
                               num_workers=4,
-                              collate_fn=lambda x: collate_fn(x, tokenizer.pad_token_id, features=True))
+                              collate_fn=lambda x: collate_fn(x,
+                                                              tokenizer.pad_token_id,
+                                                              features=True))
     return train_loader, valid_loader
 
 
-def train():
+def get_args():
     parser = ArgumentParser()
     parser.add_argument("--train_path", type=str,
-                        default="data/train_set4DSTC7-AVSD.json", help="Path of the trainset")
+                        default="../AVSD_data/train_set4DSTC7-AVSD.json", help="Path of the trainset")
     parser.add_argument("--fea_path", type=str,
-                        default="data/", help="Path of the trainset")
+                        default="../AVSD_data/", help="Path of the trainset")
     parser.add_argument("--valid_path", type=str,
-                        default="data/valid_set4DSTC7-AVSD.json", help="Path of the validset")
+                        default="../AVSD_data/valid_set4DSTC7-AVSD.json", help="Path of the validset")
     parser.add_argument("--model_checkpoint", type=str,
                         default="gpt2", help="Path, url or short name of the model")
     parser.add_argument("--max_history", type=int, default=3,
@@ -95,15 +99,22 @@ def train():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available()
                         else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--fp16", type=str, default="",
-                        help="Set to O0, O1, O2 or O3 for fp16 training (see apex documentation)")
+                        help="Set to 00, 01, 02 or 03 for fp16 training (see apex documentation)")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="Local rank for distributed training (-1: not distributed)")
     parser.add_argument("--log_path", type=str,
                         default="log/", help="Log path")
-    args = parser.parse_args()
+    parser.add_argument("--debug", action="store_true",
+                        help='Enable debug mode for only print')
+    return parser.parse_args()
 
+
+def train():
+    args = get_args()
+
+    '''Setup'''
     if not os.path.exists(args.log_path):
-        os.makedirs(args.log_path)
+        os.makedirs(args.log_path, exist_ok=True)
     # logging is set to INFO (resp. WARN) for main (resp. auxiliary) process. logger.info => log main process only, logger.warning => log all processes
     logging.basicConfig(
         level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
@@ -111,13 +122,13 @@ def train():
     logger.warning("Running process %d", args.local_rank)
     logger.info("Arguments: %s", pformat(args))
 
-    # Initialize distributed training if needed
+    '''Initialize distributed training if needed'''
     args.distributed = (args.local_rank != -1)
     if args.distributed:
         torch.cuda.set_device(args.local_rank)
         args.device = torch.device("cuda", args.local_rank)
-        torch.distributed.init_process_group(
-            backend='nccl', init_method='env://')
+        torch.distributed.init_process_group(backend='nccl',
+                                             init_method='env://')
 
     logger.info(
         "Prepare tokenizer, pretrained model and optimizer - add special tokens for fine-tuning")
@@ -130,7 +141,9 @@ def train():
     model.to(args.device)
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
-    # Prepare model for FP16 and distributed training if needed (order is important, distributed should be the last)
+    '''
+    Prepare model for FP16 and distributed training if needed (order is important, distributed should be the last)
+    '''
     if args.fp16:
         from apex import amp  # Apex is only required if we use fp16 training
         model, optimizer = amp.initialize(
@@ -138,11 +151,12 @@ def train():
     if args.distributed:
         model = DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank)
+        model = model.module
 
     logger.info("Prepare datasets")
     train_loader, val_loader = get_data_loaders_new(args, tokenizer)
 
-    # Training function and trainer
+    '''Training function and trainer'''
     def update(engine, batch):
         model.train()
         batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
@@ -150,8 +164,11 @@ def train():
         input_embs = model.transformer.wte(input_ids)
         video_embs = model.video_ff(i3d)
         input_embs = torch.cat([video_embs, input_embs], dim=1)
-        token_type_ids = torch.cat([torch.ones((i3d.size(0), i3d.size(1))).long().cuda(
-        ) * tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]), token_type_ids], dim=1)
+        token_type_ids = torch.cat([
+            torch.ones((i3d.size(0), i3d.size(1))).long().cuda() *
+            tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[-2]),
+            token_type_ids
+        ], dim=1)
         video_loss = model(input_embs,
                            token_type_ids=token_type_ids,
                            labels=(labels, i3d),
@@ -175,9 +192,8 @@ def train():
             optimizer.step()
             optimizer.zero_grad()
         return loss.item()
-    trainer = Engine(update)
 
-    # Evaluation function and evaluator (evaluator output is the input of the metrics)
+    '''Evaluation function and evaluator (evaluator output is the input of the metrics)'''
     def inference(engine, batch):
         model.eval()
         with torch.no_grad():
@@ -198,21 +214,26 @@ def train():
                                                :].contiguous().view(-1, lm_logits.size(-1))
             lm_labels_flat_shifted = lm_labels[..., 1:].contiguous().view(-1)
             return lm_logits_flat_shifted, lm_labels_flat_shifted
+
+    '''Engines'''
+    trainer = Engine(update)
     evaluator = Engine(inference)
 
-    # Attach evaluation to trainer: we evaluate when we start the training and at the end of each epoch
+    '''
+    Attach evaluation to trainer: we evaluate when we start the training and at the end of each epoch
+    '''
     trainer.add_event_handler(Events.EPOCH_COMPLETED,
                               lambda _: evaluator.run(val_loader))
     if args.n_epochs < 1:
-        trainer.add_event_handler(
-            Events.COMPLETED, lambda _: evaluator.run(val_loader))
+        trainer.add_event_handler(Events.COMPLETED,
+                                  lambda _: evaluator.run(val_loader))
     if args.eval_before_start:
-        trainer.add_event_handler(
-            Events.STARTED, lambda _: evaluator.run(val_loader))
+        trainer.add_event_handler(Events.STARTED,
+                                  lambda _: evaluator.run(val_loader))
 
     # Linearly decrease the learning rate from lr to zero
-    scheduler = PiecewiseLinear(
-        optimizer, "lr", [(0, args.lr), (args.n_epochs * len(train_loader), 0.0)])
+    scheduler = PiecewiseLinear(optimizer, "lr",
+                                [(0, args.lr), (args.n_epochs * len(train_loader), 0.0)])
     trainer.add_event_handler(Events.ITERATION_STARTED, scheduler)
 
     # Prepare metrics - note how we compute distributed metrics
@@ -232,7 +253,9 @@ def train():
     for name, metric in metrics.items():
         metric.attach(evaluator, name)
 
-    # On the main process: add progress bar, tensorboard, checkpoints and save model, configuration and tokenizer before we start to train
+    '''
+    On the main process: add progress bar, tensorboard, checkpoints and save model, configuration and tokenizer before we start to train
+    '''
     if args.local_rank in [-1, 0]:
         pbar = ProgressBar(persist=True)
         pbar.attach(trainer, metric_names=["loss"])
@@ -254,10 +277,9 @@ def train():
 
         checkpoint_handler = ModelCheckpoint(args.log_path,
                                              'checkpoint',
-                                             save_interval=1,
                                              n_saved=8,
                                              require_empty=False)
-        trainer.add_event_handler(Events.EPOCH_COMPLETED,
+        trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1),
                                   checkpoint_handler,
                                   {'mymodel': getattr(model, 'module', model)})
         # "getattr" take care of distributed encapsulation
@@ -267,10 +289,12 @@ def train():
             os.path.join(args.log_path, CONFIG_NAME))
         tokenizer.save_vocabulary(args.log_path)
 
-    # Run the training
+    '''Run the training'''
     trainer.run(train_loader, max_epochs=args.n_epochs)
 
-    # On the main process: close tensorboard logger and rename the last checkpoint (for easy re-loading with OpenAIGPTModel.from_pretrained method)
+    '''
+    On the main process: close tensorboard logger and rename the last checkpoint (for easy re-loading with OpenAIGPTModel.from_pretrained method)
+    '''
     if args.local_rank in [-1, 0] and args.n_epochs > 0:
         # TODO: PR in ignite to have better access to saved file paths (cleaner)
         os.rename(checkpoint_handler._saved[-1][1][-1],

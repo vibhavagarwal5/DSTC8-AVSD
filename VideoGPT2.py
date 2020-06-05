@@ -163,7 +163,6 @@ class Block(nn.Module):
 
 
 class VideoGPT2Model(GPT2Model):
-
     def __init__(self, config):
         super(VideoGPT2Model, self).__init__(config)
         self.h = nn.ModuleList(
@@ -252,10 +251,11 @@ class VideoGPT2Model(GPT2Model):
                 all_hidden_states = all_hidden_states + \
                     (hidden_states.view(*output_shape),)
 
-            outputs = block(hidden_states,
-                            layer_past=layer_past,
-                            attention_mask=attention_mask,
-                            head_mask=head_mask[i])
+            outputs = block(
+                hidden_states,
+                layer_past=layer_past,
+                attention_mask=attention_mask,
+                head_mask=head_mask[i])
 
             hidden_states, present = outputs[:2]
             presents = presents + (present,)
@@ -312,17 +312,19 @@ class VideoGPT2LMHeadModel(GPT2PreTrainedModel):
             head_mask=None,
             labels=None,
             mode="reply"):
-        transformer_outputs = self.transformer(input_embs,
-                                               past=past,
-                                               attention_mask=attention_mask,
-                                               token_type_ids=token_type_ids,
-                                               position_ids=position_ids,
-                                               head_mask=head_mask)
+        transformer_outputs = self.transformer(
+            input_embs,
+            past=past,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask)
+
         hidden_states = transformer_outputs[0]
-
         lm_logits = self.lm_head(hidden_states)
-
         outputs = (lm_logits,) + transformer_outputs[1:]
+
+        # NOTE: Shift this in the train loop
         if labels is not None:
             # Shift so that tokens < n predict n
             if mode == "reply":
