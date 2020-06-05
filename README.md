@@ -25,8 +25,16 @@ All the data should be saved into folder `data/` in the repo root folder.
 
 ### Train
 
+-   Single GPU
+
 ```shell
 python train.py --log_path log/
+```
+
+-   Multi GPU: (Use **launch utility** of pytorch distributed library)
+
+```shell
+python -m torch.distributed.launch --nproc_per_node=2 train.py
 ```
 
 ### Generate
