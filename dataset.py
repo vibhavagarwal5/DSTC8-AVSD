@@ -232,3 +232,51 @@ def build_input_from_segments(caption, history, reply, tokenizer, with_eos=True,
                                                 for s in sequence[:-1])) + sequence[-1]
 
     return instance, sequence
+
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    from transformers import *
+    from torch.utils.data import DataLoader
+
+    parser = ArgumentParser()
+    parser.add_argument("--train_path", type=str,
+                        default="../AVSD_data/train_set4DSTC7-AVSD.json", help="Path of the trainset")
+    parser.add_argument("--valid_path", type=str,
+                        default="../AVSD_data/valid_set4DSTC7-AVSD.json", help="Path of the validset")
+    parser.add_argument("--fea_path", type=str,
+                        default="../AVSD_data/", help="Path of the trainset")
+    parser.add_argument("--model_checkpoint", type=str,
+                        default="gpt2", help="Path, url or short name of the model")
+    parser.add_argument("--max_history", type=int, default=3,
+                        help="Number of previous exchanges to keep in history")
+    parser.add_argument("--train_batch_size", type=int,
+                        default=4, help="Batch size for training")
+    args = parser.parse_args()
+
+    tokenizer_class = GPT2Tokenizer
+    tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
+    tokenizer.add_special_tokens(SPECIAL_TOKENS_DICT)
+
+    train_data = get_dataset(tokenizer,
+                             args.train_path,
+                             args.fea_path,
+                             n_history=args.max_history)
+    valid_data = get_dataset(tokenizer, args.valid_path,
+                             args.fea_path, n_history=args.max_history)
+    train_dataset = AVSDDataSet(train_data[0], tokenizer,
+                                (train_data[1], valid_data[1]),
+                                drop_rate=0, train=True)
+    train_loader = DataLoader(train_dataset,
+                              batch_size=args.train_batch_size,
+                              num_workers=4,
+                              collate_fn=lambda x: collate_fn(x,
+                                                              tokenizer.pad_token_id,
+                                                              features=True))
+    for index, value in enumerate(next(iter(train_loader))):
+        print(value.shape, value[0])
+        if index in [0, 1, 2]:
+            print(tokenizer.convert_ids_to_tokens(value.numpy()[0]))
+        # if index == 3:
+        #     print(tokenizer.convert_ids_to_tokens(
+        #         value[0].type(torch.FloatTensor)))
