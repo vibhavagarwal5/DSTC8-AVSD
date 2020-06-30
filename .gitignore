@@ -102,5 +102,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
-**/log/*
-**/tb_logs/*
+**/*log*/*
+**/output/**
+*.pkl
