@@ -22,7 +22,7 @@ from transformers import *
 
 from dataset import (LABEL_TOKENS, SPECIAL_TOKENS, SPECIAL_TOKENS_DICT,
                      ImageTextDataset, collate_fn, get_data)
-from ImageGPT2 import ImageGPT2LMHeadModel
+from ImageGPT2 import ImageGPT2LMHeadModel, ImageGPT2DoubleHeadsModel
 
 logger = logging.getLogger(__file__)
 
@@ -139,10 +139,8 @@ def main():
 
     logger.info(
         "Prepare tokenizer, pretrained model and optimizer - add special tokens for fine-tuning")
-    tokenizer_class = GPT2Tokenizer
-    tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
-    model_class = ImageGPT2LMHeadModel
-    model = model_class.from_pretrained(args.model_checkpoint)
+    tokenizer = GPT2Tokenizer.from_pretrained(args.model_checkpoint)
+    model = ImageGPT2DoubleHeadsModel.from_pretrained(args.model_checkpoint)
     tokenizer.add_tokens(LABEL_TOKENS)
     tokenizer.add_special_tokens(SPECIAL_TOKENS_DICT)
     model.resize_token_embeddings(len(tokenizer))
@@ -168,23 +166,20 @@ def main():
     def train(engine, batch):
         model.train()
         batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
-        image, input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl, input_mask, sec_mask = batch
+        image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label, input_mask, sec_mask = batch
         input_embs = model.transformer.wte(input_ids)
         image_embs = model.image_fc(image)
         input_embs = torch.cat([image_embs, input_embs], dim=1)
 
-        expl_out = model(input_embs,
-                         token_type_ids=token_type_ids,
-                         labels=lm_labels_expl,
-                         attention_mask=[sec_mask, input_mask],)
-        lbl_out = model(input_embs,
-                        token_type_ids=token_type_ids,
-                        labels=lm_labels_lbl,
-                        attention_mask=[sec_mask, input_mask],)
-        expl_loss, _, _ = expl_out
-        lbl_loss, lbl_lm_logits, _ = lbl_out
+        output = model(input_embs,
+                       token_type_ids=token_type_ids,
+                       attention_mask=[sec_mask, input_mask],
+                       labels=lm_labels_expl,
+                       mc_token_ids=lbl_token_location,
+                       mc_labels=label)
+        lm_loss, mc_loss, mc_logits, lm_logits, _ = output
 
-        loss = (expl_loss + lbl_loss) / args.gradient_accumulation_steps
+        loss = (lm_loss + mc_loss) / args.gradient_accumulation_steps
         if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
@@ -196,9 +191,8 @@ def main():
         if engine.state.iteration % args.gradient_accumulation_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
-        lbl_lm_logits = lbl_lm_logits.argmax(dim=2)
-        lbl_accuracy = (lm_labels_lbl == lbl_lm_logits).float(
-        ).sum() / len(lm_labels_lbl)
+        mc_logits = mc_logits.argmax(dim=1)
+        lbl_accuracy = (label == mc_logits).float().sum() / len(label)
         return {
             'loss': loss.item(),
             'lbl_accuracy': lbl_accuracy.item()
@@ -210,28 +204,26 @@ def main():
         with torch.no_grad():
             batch = tuple(input_tensor.to(args.device)
                           for input_tensor in batch)
-            image, input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl, input_mask, sec_mask = batch
+            image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label, input_mask, sec_mask = batch
             input_embs = model.transformer.wte(input_ids)
             image_embs = model.image_fc(image)
             input_embs = torch.cat([image_embs, input_embs], dim=1)
 
-            expl_lm_logits = model(input_embs,
-                                   token_type_ids=token_type_ids,
-                                   attention_mask=[sec_mask, input_mask],)[0]
-            lbl_lm_logits = model(input_embs,
-                                  token_type_ids=token_type_ids,
-                                  attention_mask=[sec_mask, input_mask],)[0]
+            output = model(input_embs,
+                           token_type_ids=token_type_ids,
+                           attention_mask=[sec_mask, input_mask],
+                           mc_token_ids=lbl_token_location,
+                           )
+            mc_logits, lm_logits, _ = output
 
-            expl_lm_logits_flat_shifted = expl_lm_logits[..., :-1,
-                                                         :].contiguous().view(-1, expl_lm_logits.size(-1))
-            lm_labels_expl_flat_shifted = lm_labels_expl[..., 1:].contiguous(
+            lm_logits_shifted = lm_logits[..., :-1,
+                                          :].contiguous().view(-1, lm_logits.size(-1))
+            lm_labels_shifted = lm_labels_expl[..., 1:].contiguous(
             ).view(-1)
-            lbl_lm_logits_flat_shifted = lbl_lm_logits[..., :-1,
-                                                       :].contiguous().view(-1, lbl_lm_logits.size(-1))
-            lm_labels_lbl_flat_shifted = lm_labels_lbl[..., 1:].contiguous(
-            ).view(-1)
+            mc_logits_shifted = mc_logits.view(-1, mc_logits.size(-1))
+            label_shifted = label.view(-1)
 
-            return expl_lm_logits_flat_shifted, lm_labels_expl_flat_shifted, lbl_lm_logits_flat_shifted, lm_labels_lbl_flat_shifted
+            return lm_logits_shifted, lm_labels_shifted, mc_logits_shifted, label_shifted
 
     '''Engines'''
     trainer = Engine(train)
@@ -301,14 +293,11 @@ def main():
                              metric_names=["lbl_accuracy", "ppl"]),
                          event_name=Events.EPOCH_COMPLETED)
 
-        def global_step_transform(*args, **kwargs):
-            return trainer.state.iteration
         tb_logger.attach(validator,
                          log_handler=OutputHandler(
                              tag="validation",
-                             metric_names=[
-                                 'ppl', 'loss', 'lbl_accuracy'],
-                             global_step_transform=global_step_transform),
+                             metric_names=['ppl', 'loss', 'lbl_accuracy'],
+                             global_step_transform=lambda *args, **kwargs: trainer.state.iteration),
                          event_name=Events.EPOCH_COMPLETED)
 
         checkpoint_handler = ModelCheckpoint(output_dir,

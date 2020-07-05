@@ -61,7 +61,7 @@ class Attention(nn.Module):
             w = w / math.sqrt(v.size(-1))
         nd, ns = w.size(-2), w.size(-1)
         b = self.bias[:, :, ns - nd:ns, :ns]
-        #w = w * b - 1e18 * (1 - b)
+        # w = w * b - 1e18 * (1 - b)
 
         if attention_mask is not None:
             # Apply the attention mask
@@ -206,7 +206,7 @@ class ImageGPT2Model(GPT2Model):
                 dtype=next(self.parameters()).dtype)  # fp16 compatibility
             attention_mask[1] = attention_mask[1].to(
                 dtype=next(self.parameters()).dtype)  # fp16 compatibility
-            #attention_mask = (1.0 - attention_mask) * -1e18
+            # attention_mask = (1.0 - attention_mask) * -1e18
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -295,7 +295,7 @@ class ImageGPT2LMHeadModel(GPT2PreTrainedModel):
         self.tie_weights()
 
     def tie_weights(self):
-        """ 
+        """
         Make sure we are sharing the input and output embeddings.
         Export to TorchScript can't handle parameter sharing so we are cloning them instead.
         """
@@ -328,10 +328,141 @@ class ImageGPT2LMHeadModel(GPT2PreTrainedModel):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_text_fct = CrossEntropyLoss(ignore_index=-1)
-            loss_text = loss_text_fct(shift_logits.view(-1, shift_logits.size(-1)),
-                                      shift_labels.view(-1))
-            loss = loss_text
+            loss = loss_text_fct(shift_logits.view(-1, shift_logits.size(-1)),
+                                 shift_labels.view(-1))
             outputs = (loss,) + outputs
 
         # (loss), lm_logits, presents, (all hidden_states), (attentions)
         return outputs
+
+
+class ImageGPT2DoubleHeadsModel(GPT2PreTrainedModel):
+    def __init__(self, config):
+        super(ImageGPT2DoubleHeadsModel, self).__init__(config)
+        self.transformer = ImageGPT2Model(config)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.image_fc = nn.Linear(512, config.n_embd)
+        config.num_labels = 3
+        self.multiple_choice_head = modeling_utils.SequenceSummary(config)
+
+        self.init_weights()
+        self.tie_weights()
+
+    def tie_weights(self):
+        """
+        Make sure we are sharing the input and output embeddings.
+        Export to TorchScript can't handle parameter sharing so we are cloning them instead.
+        """
+        self._tie_or_clone_weights(self.lm_head, self.transformer.wte)
+
+    def forward(
+            self,
+            input_embs,
+            past=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            labels=None,
+            mc_token_ids=None,
+            mc_labels=None):
+
+        transformer_outputs = self.transformer(
+            input_embs,
+            past=past,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask)
+
+        hidden_states = transformer_outputs[0]
+        lm_logits = self.lm_head(hidden_states)
+        outputs = (lm_logits,) + transformer_outputs[1:]
+        mc_logits = self.multiple_choice_head(
+            hidden_states, mc_token_ids).squeeze(-1)
+        outputs = (mc_logits,) + outputs
+
+        if mc_labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                mc_logits.view(-1, mc_logits.size(-1)), mc_labels.view(-1))
+            outputs = (loss,) + outputs
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_text_fct = CrossEntropyLoss(ignore_index=-1)
+            loss = loss_text_fct(shift_logits.view(-1, shift_logits.size(-1)),
+                                 shift_labels.view(-1))
+            outputs = (loss,) + outputs
+
+        # lm loss, mc loss, mc_logits, lm_logits, presents, (all hidden_states), (attentions)
+        return outputs
+
+
+# class ImageGPT2DoubleHeadsModel(GPT2PreTrainedModel):
+#     def __init__(self, config):
+#         super().__init__(config)
+#         config.num_labels = 3
+#         self.transformer = ImageGPT2Model(config)
+#         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+#         self.multiple_choice_head = modeling_utils.SequenceSummary(config)
+#         self.image_fc = nn.Linear(512, config.n_embd)
+
+#         self.init_weights()
+#         self.tie_weights()
+
+#     def get_output_embeddings(self):
+#         return self.lm_head
+
+#     def tie_weights(self):
+#         """
+#         Make sure we are sharing the input and output embeddings.
+#         Export to TorchScript can't handle parameter sharing so we are cloning them instead.
+#         """
+#         self._tie_or_clone_weights(self.lm_head, self.transformer.wte)
+
+#     def forward(
+#         self,
+#         input_embs,
+#         past=None,
+#         attention_mask=None,
+#         token_type_ids=None,
+#         position_ids=None,
+#         head_mask=None,
+#         labels=None,
+#         mc_token_ids=None,
+#         mc_labels=None,
+#     ):
+#         transformer_outputs = self.transformer(
+#             input_embs,
+#             past=past,
+#             attention_mask=attention_mask,
+#             token_type_ids=token_type_ids,
+#             position_ids=position_ids,
+#             head_mask=head_mask)
+
+#         hidden_states = transformer_outputs[0]
+#         lm_logits = self.lm_head(hidden_states)
+#         outputs = (lm_logits,) + transformer_outputs[1:]
+
+#         # mc_logits = self.multiple_choice_head(
+#         #     hidden_states, mc_token_ids).squeeze(-1)
+#         # outputs = (mc_logits,) + outputs
+
+#         # if mc_labels is not None:
+#         #     loss_fct = CrossEntropyLoss()
+#         #     loss = loss_fct(
+#         #         mc_logits.view(-1, mc_logits.size(-1)), mc_labels.view(-1))
+#         #     outputs = (loss,) + outputs
+#         if labels is not None:
+#             shift_logits = lm_logits[..., :-1, :].contiguous()
+#             shift_labels = labels[..., 1:].contiguous()
+#             loss_fct = CrossEntropyLoss()
+#             loss = loss_fct(
+#                 shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+#             outputs = (loss,) + outputs
+
+#         # lm loss, mc loss, lm_logits, mc_logits, presents, (all hidden_states), (attentions)
+#         return outputs

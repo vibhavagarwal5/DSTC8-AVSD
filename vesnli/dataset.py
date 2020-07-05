@@ -15,8 +15,11 @@ SPECIAL_TOKENS_DICT = {
     'additional_special_tokens': ["<image>", '<label>', '<hypothesis>', '<expl>'],
 }
 LABEL_TOKENS = ['neutral', 'contradiction', 'entailment']
-PADDED_INPUTS = ["input_ids", "token_type_ids",
-                 "lm_labels_expl", "lm_labels_lbl"]
+LABEL_TOKENS_DICT = {
+    'neutral': 0,
+    'contradiction': 1,
+    'entailment': 2
+}
 
 
 def get_data(tokenizer, data_path, data_type, to_save=False, final_data_path=None):
@@ -46,15 +49,13 @@ def get_data(tokenizer, data_path, data_type, to_save=False, final_data_path=Non
             [additional_special_tokens[1]] * (len(data['labels'][i])) +
             [additional_special_tokens[2]] * (len(data['s2'][i]) + 1))) +
             [additional_special_tokens[3]] + data['expl_1'][i] + [tokenizer.eos_token_id])
-        lm_labels_lbl.append(
-            [-1] * (len([additional_special_tokens[0]] * (len(data['image'][i])))) +
-            data['labels'][i] +
-            [-1] * len([additional_special_tokens[2]] * (len(data['s2'][i]) + 1) +
-                       [additional_special_tokens[3]] * (len(data['expl_1'][i]) + 1 + 1)))
     data['input_ids'] = input_ids
     data['token_type_ids'] = token_type_ids
     data['lm_labels_expl'] = lm_labels_expl
-    data['lm_labels_lbl'] = lm_labels_lbl
+    data['lbl_token_location'] = [data['image'][0].shape[0] + sentence.index(
+        additional_special_tokens[1]) for sentence in data['input_ids']]
+    data['labels_int'] = [
+        LABEL_TOKENS_DICT[tokenizer.decode(i)] for i in data['labels']]
 
     if to_save:
         if final_data_path is not None:
@@ -81,15 +82,16 @@ class ImageTextDataset(Dataset):
             self.all_data['token_type_ids'][index]).long()
         lm_labels_expl = torch.tensor(
             self.all_data['lm_labels_expl'][index]).long()
-        lm_labels_lbl = torch.tensor(
-            self.all_data['lm_labels_lbl'][index]).long()
-        return image, input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl
+        lbl_token_location = torch.tensor(
+            self.all_data['lbl_token_location'][index]).long()
+        label = torch.tensor(
+            self.all_data['labels_int'][index]).long()
+        return image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label
 
 
 def collate_fn(batch, pad_token):
     def padding(seq, pad_token):
         max_len = max(len(s) for s in seq)
-        # print(max_len, seq[0].size(), pad_token)
         padded_mask = torch.ones((len(seq), max_len)).long() * pad_token
         for i in range(len(seq)):
             padded_mask[i, :len(seq[i])] = seq[i]
@@ -97,30 +99,30 @@ def collate_fn(batch, pad_token):
         # print(tokenizer.convert_ids_to_tokens(padded_mask[1]))
         return padded_mask
 
-    image, input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl = [], [], [], [], []
+    image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label = [
+    ], [], [], [], [], []
     for i in batch:
         image.append(i[0])
         input_ids.append(i[1])
         token_type_ids.append(i[2])
         lm_labels_expl.append(i[3])
-        lm_labels_lbl.append(i[4])
+        lbl_token_location.append(i[4])
+        label.append(i[5])
 
     image = torch.tensor(image)
+    # print(image.shape)
     input_ids = padding(input_ids, pad_token)
     token_type_ids = padding(token_type_ids, pad_token)
-    # print(image.shape)
     lm_labels_expl = padding(lm_labels_expl, -1)
-    lm_labels_lbl = padding(lm_labels_lbl, -1)
+    lbl_token_location = torch.tensor(lbl_token_location)
+    label = torch.tensor(label)
 
     input_mask = input_ids != pad_token
     input_mask = input_mask.long()
     image_mask = torch.ones((len(image), 1)).long()
     input_mask = torch.cat([image_mask, input_mask], dim=1)
-    # print(input_mask)
     sec_mask = torch.zeros(input_mask.shape)
-    # print(sec_mask)
-    # print(sec_mask.shape, input_mask.shape)
-    return image, input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl, input_mask, sec_mask
+    return image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label, input_mask, sec_mask
 
 
 '''main'''
@@ -153,10 +155,13 @@ if __name__ == "__main__":
 
     l = next(iter(dataloader))
     for i, v in enumerate(l):
-        print(v.shape)
-        if i in [1, 2, 3, 4]:
-            print(v[0])
-            print(tokenizer.convert_ids_to_tokens(v[0]))
+        print(i, v.shape)
+        if i not in [0, 6, 7]:
+            if i not in [4, 5]:
+                print(v[0])
+                print(tokenizer.convert_ids_to_tokens(v[0]))
+            else:
+                print(v)
 
     # t = list(tokenizer.get_vocab().keys())
     # data_path = '../../mycode-vesnli/dataset/e-SNLI-VE'
