@@ -254,7 +254,7 @@ def main():
     metrics = {
         "expl_loss": Loss(torch.nn.CrossEntropyLoss(ignore_index=-1),
                           output_transform=lambda x: (x[0], x[1])),
-        "lbl_loss": Loss(torch.nn.CrossEntropyLoss(ignore_index=-1),
+        "lbl_loss": Loss(torch.nn.CrossEntropyLoss(),
                          output_transform=lambda x: (x[2], x[3])),
         'lbl_accuracy_tmp1': Accuracy(output_transform=lambda x: (x[2], x[3]))
     }
@@ -312,7 +312,7 @@ def main():
         torch.save(args, os.path.join(output_dir, 'model_training_args.bin'))
         getattr(model, 'module', model).config.to_json_file(
             os.path.join(output_dir, CONFIG_NAME))
-        # tokenizer.save_vocabulary(output_dir)
+        tokenizer.save_vocabulary(output_dir)
 
     '''Run the training'''
     trainer.run(train_loader, max_epochs=args.n_epochs)
