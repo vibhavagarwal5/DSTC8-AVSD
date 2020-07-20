@@ -289,7 +289,7 @@ class ImageGPT2LMHeadModel(GPT2PreTrainedModel):
         super(ImageGPT2LMHeadModel, self).__init__(config)
         self.transformer = ImageGPT2Model(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.image_fc = nn.Linear(512, config.n_embd)
+        self.image_fc = nn.Linear(2048, config.n_embd)
 
         self.init_weights()
         self.tie_weights()
@@ -341,7 +341,7 @@ class ImageGPT2DoubleHeadsModel(GPT2PreTrainedModel):
         super(ImageGPT2DoubleHeadsModel, self).__init__(config)
         self.transformer = ImageGPT2Model(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.image_fc = nn.Linear(512, config.n_embd)
+        self.image_fc = nn.Linear(2048, config.n_embd)
         config.num_labels = 3
         self.multiple_choice_head = modeling_utils.SequenceSummary(config)
 

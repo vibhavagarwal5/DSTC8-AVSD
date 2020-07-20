@@ -11,9 +11,8 @@ import torch
 import torch.nn.functional as F
 from transformers import *
 
-from dataset import (LABEL_TOKENS, SPECIAL_TOKENS,
-                     SPECIAL_TOKENS_DICT, get_data)
-from ImageGPT2 import ImageGPT2LMHeadModel, ImageGPT2DoubleHeadsModel
+from dataset import LABEL_TOKENS, SPECIAL_TOKENS, SPECIAL_TOKENS_DICT, get_data
+from ImageGPT2 import ImageGPT2DoubleHeadsModel, ImageGPT2LMHeadModel
 
 
 def generate_data(data, expl_inp, tokenizer):
@@ -22,7 +21,7 @@ def generate_data(data, expl_inp, tokenizer):
     input_ids.append([additional_special_tokens[2]] + data['s2'] +
                      [additional_special_tokens[3]] + expl_inp)
     token_type_ids.append(
-        [additional_special_tokens[0]] * (len(data['image'])) +
+        [additional_special_tokens[0]] * (36) +
         [additional_special_tokens[2]] * (len(data['s2']) + 1) +
         [additional_special_tokens[3]] * (len(expl_inp) + 1))
     data['input_ids'] = input_ids
@@ -30,23 +29,14 @@ def generate_data(data, expl_inp, tokenizer):
     return data
 
 
-def top_kp_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
-    """ Filter a distribution of logits using top-k, top-p (nucleus) and/or threshold filtering
-        Args:
-            logits: logits distribution shape (vocabulary size)
-            top_k: <=0: no filtering, >0: keep only top k tokens with highest probability.
-            top_p: <=0.0: no filtering, >0.0: keep only a subset S of candidates, where S is the smallest subset
-                whose total probability mass is greater than or equal to the threshold top_p.
-                In practice, we select the highest probability tokens whose cumulative probability mass exceeds
-                the threshold top_p.
-            threshold: a minimal threshold to keep logits
-    """
-    assert logits.dim() == 1  # Only work for batch size 1 for now - could update but it would obfuscate a bit the code
+def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
+    # Only work for batch size 1 for now - could update but it would obfuscate a bit the code
+    assert logits.dim() == 1
     top_k = min(top_k, logits.size(-1))
     if top_k > 0:
         # Remove all tokens with a probability less than the last token in the top-k tokens
-        indices_to_remove = logits < \
-            torch.topk(logits, top_k)[0][..., -1, None]
+        indices_to_remove = logits < torch.topk(logits, top_k)[
+            0][..., -1, None]
         logits[indices_to_remove] = filter_value
 
     if top_p > 0.0:
@@ -66,9 +56,6 @@ def top_kp_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter
         indices_to_remove = sorted_indices[sorted_indices_to_remove]
         logits[indices_to_remove] = filter_value
 
-    indices_to_remove = logits < threshold
-    logits[indices_to_remove] = filter_value
-
     return logits
 
 
@@ -87,51 +74,27 @@ def sample_sequence(data, tokenizer, model, args):
         input_embs = torch.cat([image_embs, input_embs], dim=1)
 
         output = model(input_embs, token_type_ids=token_type_ids)
-        if "gpt2" == args.model:
-            logits = output[0]
-        logits = logits[0, -1, :] / args.temperature
-        logits = top_kp_filtering(logits, top_k=args.top_k, top_p=args.top_p)
-        probs = F.softmax(logits, dim=-1)
+        next_token_logits = output[0][0, -1, :]
 
         if args.no_sample:
-            prev = torch.topk(probs, 1)[1]
+            # Greedy decoding
+            next_token = torch.argmax(next_token_logits, dim=-1)
         else:
-            # greedy decoding
-            prev = torch.multinomial(probs, 1)
-        if i < args.min_length and prev.item() in special_tokens_ids:
-            while prev.item() in special_tokens_ids:
-                prev = torch.multinomial(probs, num_samples=1)
+            if args.temperature != 1.0:
+                next_token_logits /= args.temperature
+            next_token_logscores = top_k_top_p_filtering(
+                next_token_logits, top_k=args.top_k, top_p=args.top_p)
+            probs = F.softmax(next_token_logscores, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
 
-        if prev.item() == tokenizer.eos_token_id:
+        # if i < args.min_length and next_token.item() in special_tokens_ids:
+        #     while next_token.item() in special_tokens_ids:
+        #         next_token = torch.multinomial(probs, num_samples=1)
+
+        if next_token.item() in special_tokens_ids:
             break
-        current_output.append(prev.item())
+        current_output.append(next_token.item())
 
-    return current_output
-
-
-def greedy_decode(data, tokenizer, model, args):
-    special_tokens_ids = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS)
-    current_output = []
-
-    for i in range(args.max_length):
-        data = generate_data(data, current_output, tokenizer)
-        input_ids = torch.tensor(data["input_ids"],
-                                 device=args.device)
-        token_type_ids = torch.tensor(data["token_type_ids"],
-                                      device=args.device)
-        image = torch.tensor(data['image'], device=args.device)
-        input_embs = model.transformer.wte(input_ids)
-        image_embs = model.image_fc(image)
-        input_embs = torch.cat([image_embs, input_embs], dim=1)
-
-        logits = model(input_embs, token_type_ids=token_type_ids)
-        if "gpt2" == args.model:
-            logits = logits[0][0]
-        logits = logits.cpu().data.numpy()
-        next_word = np.argsort(logits[-1])[-1]
-        # if next_word == tokenizer.eos_token_id:
-        #     break
-        current_output.append(next_word)
     return current_output
 
 
@@ -156,9 +119,8 @@ def beam_search(data, tokenizer, model, args):
             input_embs = torch.cat([image_embs, input_embs], dim=1)
 
             output = model(input_embs, token_type_ids=token_type_ids)
-            if "gpt2" == args.model:
-                logits = output[0]
-            logp = F.log_softmax(logits, dim=-1)[:, -1, :]
+            next_token_logits = output[0][:, -1, :]
+            logp = F.log_softmax(next_token_logits, dim=-1)
             lp_vec = logp.cpu().data.numpy() + lp
             lp_vec = np.squeeze(lp_vec)
             if i >= args.min_length:
@@ -199,29 +161,36 @@ def beam_search(data, tokenizer, model, args):
 
 # Evaluation routine
 def generate_response(tokenizer, model, data, args):
+    all_images_np = np.load(
+        '/home/hdd1/vibhav/VE-SNLI/e-SNLI-VE/data/flickr30k_resnet101_bottom_up_img_features.npy')
+    f = open(
+        '/home/hdd1/vibhav/VE-SNLI/e-SNLI-VE/data/filenames_77512.json', 'r')
+    all_image_names = json.load(f)
     result_expl = []
     model.eval()
     with torch.no_grad():
         qa_id = 0
         for idx, expl in enumerate(data['expl_1']):
+            logging.info("Image_ID: " + data['image_f'][idx])
+            logging.info("Hypothesis: " + tokenizer.decode(data['s2'][idx]))
             logging.info('Org. expl: ' + tokenizer.decode(expl))
             # prepare input data
             data_ = {}
-            data_['image'] = [data['image'][idx]]
+            # data_['image'] = [data['image'][idx]]
+            data_['image'] = [all_images_np[all_image_names.index(
+                data['image_f'][idx])]]
             data_['s2'] = data['s2'][idx]
             start_time = time.time()
             if args.beam_search:
                 hypstr = beam_search(data_, tokenizer, model, args)
                 hypstr = hypstr[0][0]
-            # elif args.no_sample:
-            #     hypstr = greedy_decode(data_, tokenizer, model, args)
             else:
                 hypstr = sample_sequence(data_, tokenizer, model, args)
             hypstr = tokenizer.decode(hypstr, skip_special_tokens=True)
             logging.info('Generated expl: ' + hypstr)
             result_expl.append(hypstr)
             logging.info('ElapsedTime: %f' % (time.time() - start_time))
-            logging.info('-----------------------')
+            logging.info('-----------------------\n')
 
     return result_expl
 
@@ -242,7 +211,7 @@ def get_args():
     parser.add_argument("--beam_size", type=int, default=5, help="Beam size")
     parser.add_argument("--max_length", type=int, default=40,
                         help="Maximum length of the output utterances")
-    parser.add_argument("--min_length", type=int, default=3,
+    parser.add_argument("--min_length", type=int, default=6,
                         help="Minimum length of the output utterances")
     parser.add_argument("--penalty", type=float,
                         default=0.3, help="length penalty")

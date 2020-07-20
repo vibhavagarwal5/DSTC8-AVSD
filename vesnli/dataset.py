@@ -21,38 +21,47 @@ LABEL_TOKENS_DICT = {
     'entailment': 2
 }
 
+no_of_image_feat = 36
+
 
 def get_data(tokenizer, data_path, data_type, to_save=False, final_data_path=None):
     files = ['images_tensor', 'expl_1', 'labels', 's2']
     data = {fl: [tokenizer.encode(line.rstrip()) for line in open(
         os.path.join(data_path, f"{fl}.{data_type}"), 'r')] for fl in files[1:]}
-    data['image'] = torch.load(os.path.join(data_path,
-                                            f"{files[0]}.{data_type}"))
-    data['image'] = data['image'].reshape((data['image'].shape[0],
-                                           1,
-                                           data['image'].shape[1])).numpy()
+    data['image_f'] = [line.rstrip() for line in open(
+        os.path.join(data_path, f"images.{data_type}"), 'r')]
+    # data['image'] = torch.load(os.path.join(data_path,
+    #                                         f"{files[0]}.{data_type}"))
+    # data['image'] = data['image'].reshape((data['image'].shape[0],
+    #                                        1,
+    #                                        data['image'].shape[1])).numpy()
 
     input_ids, token_type_ids, lm_labels_expl, lm_labels_lbl = [], [], [], []
     additional_special_tokens = tokenizer.additional_special_tokens_ids
     for i in range(len(data['labels'])):
         input_ids.append([additional_special_tokens[1]] +
                          [additional_special_tokens[2]] + data['s2'][i] +
+                         #  [additional_special_tokens[3]] +
                          [additional_special_tokens[3]] + data['expl_1'][i] +
-                         [tokenizer.eos_token_id])
+                         [tokenizer.eos_token_id]
+                         #  + len(data['expl_1'][i]) * [tokenizer.pad_token_id]
+                         )
         token_type_ids.append(
-            [additional_special_tokens[0]] * (len(data['image'][i])) +
+            [additional_special_tokens[0]] * (no_of_image_feat) +
             [additional_special_tokens[1]] * (len(data['labels'][i])) +
             [additional_special_tokens[2]] * (len(data['s2'][i]) + 1) +
+            # [additional_special_tokens[3]] * (1 + 1) +
+            # len(data['expl_1'][i]) * [tokenizer.pad_token_id])
             [additional_special_tokens[3]] * (len(data['expl_1'][i]) + 1 + 1))
         lm_labels_expl.append([-1] * (len(
-            [additional_special_tokens[0]] * (len(data['image'][i])) +
+            [additional_special_tokens[0]] * (no_of_image_feat) +
             [additional_special_tokens[1]] * (len(data['labels'][i])) +
             [additional_special_tokens[2]] * (len(data['s2'][i]) + 1))) +
             [additional_special_tokens[3]] + data['expl_1'][i] + [tokenizer.eos_token_id])
     data['input_ids'] = input_ids
     data['token_type_ids'] = token_type_ids
     data['lm_labels_expl'] = lm_labels_expl
-    data['lbl_token_location'] = [data['image'][0].shape[0] + sentence.index(
+    data['lbl_token_location'] = [no_of_image_feat + sentence.index(
         additional_special_tokens[1]) for sentence in data['input_ids']]
     data['labels_int'] = [
         LABEL_TOKENS_DICT[tokenizer.decode(i)] for i in data['labels']]
@@ -71,12 +80,19 @@ class ImageTextDataset(Dataset):
     def __init__(self, all_data, tokenizer):
         self.all_data = all_data
         self.tokenizer = tokenizer
+        self.all_images_np = np.load(
+            '/home/hdd1/vibhav/VE-SNLI/e-SNLI-VE/data/flickr30k_resnet101_bottom_up_img_features.npy')
+        f = open(
+            '/home/hdd1/vibhav/VE-SNLI/e-SNLI-VE/data/filenames_77512.json', 'r')
+        self.all_image_names = json.load(f)
 
     def __len__(self):
-        return len(self.all_data['image'])
+        return len(self.all_data['s2'])
 
     def __getitem__(self, index):
-        image = self.all_data['image'][index]
+        # image = self.all_data['image'][index]
+        image = self.all_images_np[self.all_image_names.index(
+            self.all_data['image_f'][index])]
         input_ids = torch.tensor(self.all_data['input_ids'][index]).long()
         token_type_ids = torch.tensor(
             self.all_data['token_type_ids'][index]).long()
@@ -95,8 +111,6 @@ def collate_fn(batch, pad_token):
         padded_mask = torch.ones((len(seq), max_len)).long() * pad_token
         for i in range(len(seq)):
             padded_mask[i, :len(seq[i])] = seq[i]
-        # print(padded_mask[1])
-        # print(tokenizer.convert_ids_to_tokens(padded_mask[1]))
         return padded_mask
 
     image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label = [
@@ -110,7 +124,6 @@ def collate_fn(batch, pad_token):
         label.append(i[5])
 
     image = torch.tensor(image)
-    # print(image.shape)
     input_ids = padding(input_ids, pad_token)
     token_type_ids = padding(token_type_ids, pad_token)
     lm_labels_expl = padding(lm_labels_expl, -1)
@@ -119,7 +132,7 @@ def collate_fn(batch, pad_token):
 
     input_mask = input_ids != pad_token
     input_mask = input_mask.long()
-    image_mask = torch.ones((len(image), 1)).long()
+    image_mask = torch.ones((len(image), no_of_image_feat)).long()
     input_mask = torch.cat([image_mask, input_mask], dim=1)
     sec_mask = torch.zeros(input_mask.shape)
     return image, input_ids, token_type_ids, lm_labels_expl, lbl_token_location, label, input_mask, sec_mask
@@ -146,6 +159,9 @@ if __name__ == "__main__":
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     tokenizer.add_tokens(LABEL_TOKENS)
     tokenizer.add_special_tokens(SPECIAL_TOKENS_DICT)
+
+    if not os.path.exists(args.final_data_path):
+        os.mkdir(args.final_data_path)
     data = get_data(tokenizer, args.data_path, args.data_type,
                     args.to_save, args.final_data_path)
     dataset = ImageTextDataset(data, tokenizer)
@@ -162,18 +178,3 @@ if __name__ == "__main__":
                 print(tokenizer.convert_ids_to_tokens(v[0]))
             else:
                 print(v)
-
-    # t = list(tokenizer.get_vocab().keys())
-    # data_path = '../../mycode-vesnli/dataset/e-SNLI-VE'
-    # files = ['images_tensor', 'expl_1', 'labels', 's2']
-    # dev = {fl: [line.rstrip() for line in open(
-    #     os.path.join(data_path, f"{fl}.dev"), 'r')] for fl in files[1:]}
-    # train = {fl: [line.rstrip() for line in open(
-    #     os.path.join(data_path, f"{fl}.train"), 'r')] for fl in files[1:]}
-    # test = {fl: [line.rstrip() for line in open(
-    #     os.path.join(data_path, f"{fl}.test"), 'r')] for fl in files[1:]}
-    # total_sen = dev['expl_1'] + dev['s2'] + train['expl_1'] + train['s2']
-    # print(total_sen[:10])
-    # v = list(itertools.chain(*[i.split(' ') for i in total_sen]))
-    # print(v[:10])
-    # print(set(v) - set(t))
