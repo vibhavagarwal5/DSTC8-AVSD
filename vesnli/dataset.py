@@ -41,18 +41,18 @@ def get_data(tokenizer, data_path, data_type, to_save=False, final_data_path=Non
     for i in range(len(data['labels'])):
         input_ids.append([additional_special_tokens[1]] +
                          [additional_special_tokens[2]] + data['s2'][i] +
-                         #  [additional_special_tokens[3]] +
+                         #  [additional_special_tokens[3]] +      # For no expl
                          [additional_special_tokens[3]] + data['expl_1'][i] +
-                         [tokenizer.eos_token_id]
-                         #  + len(data['expl_1'][i]) * [tokenizer.pad_token_id]
+                         [tokenizer.eos_token_id]      # Remove for no expl
+                         #  + len(data['expl_1'][i]) * [tokenizer.pad_token_id]      # For no expl
                          )
         token_type_ids.append(
             [additional_special_tokens[0]] * (no_of_image_feat) +
             [additional_special_tokens[1]] * (len(data['labels'][i])) +
             [additional_special_tokens[2]] * (len(data['s2'][i]) + 1) +
-            # [additional_special_tokens[3]] * (1 + 1) +
-            # len(data['expl_1'][i]) * [tokenizer.pad_token_id])
-            [additional_special_tokens[3]] * (len(data['expl_1'][i]) + 1 + 1))
+            # [additional_special_tokens[3]] * (1 + 1) +      # For no expl
+            # len(data['expl_1'][i]) * [tokenizer.pad_token_id])      # For no expl
+            [additional_special_tokens[3]] * (len(data['expl_1'][i]) + 1 + 1))      # Remove for no expl
         lm_labels_expl.append([-1] * (len(
             [additional_special_tokens[0]] * (no_of_image_feat) +
             [additional_special_tokens[1]] * (len(data['labels'][i])) +
